@@ -189,5 +189,9 @@ public class HdfsSinkConnectorTestBase {
     public void resume(TopicPartition... partitions) {
       return;
     }
+
+    @Override
+    public void requestCommit() {};
+
   }
 }

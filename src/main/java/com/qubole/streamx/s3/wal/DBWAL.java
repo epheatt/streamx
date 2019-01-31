@@ -60,7 +60,8 @@ public class DBWAL implements  WAL {
 
     try {
       String name = config.getString(S3SinkConnectorConfig.NAME_CONFIG);
-      tableName = name + "_" + topicPartition.topic() + "_" + partitionId;
+      // replace special characters and exclude connector name
+      tableName = topicPartition.topic().replaceAll("-", "_").replaceAll("\\.", "_") + "_" + partitionId;
 
       String connectionURL = config.getString(S3SinkConnectorConfig.DB_CONNECTION_URL_CONFIG);
       String user = config.getString(S3SinkConnectorConfig.DB_USER_CONFIG);
@@ -219,8 +220,14 @@ public class DBWAL implements  WAL {
           //TODO : check if all tempFiles are there.
           try {
             for (int k = 0; k < tempFile.length; k++) {
-              storage.commit(tempFile[k], committedFile[k]);
-              log.info("Recovering file " + tempFile[k] + " " + committedFile[k]);
+                // condition added to handle overwrite condition which was resulting in data loss
+                if(!storage.exists(committedFile[k])) {
+                    storage.commit(tempFile[k], committedFile[k]);
+                    log.info("Recovering file " + tempFile[k] + " " + committedFile[k]);
+                } else if(storage.exists(tempFile[k])) {
+                    storage.delete(tempFile[k]);
+                    log.info("Deleting tmp file " + tempFile[k]);
+                }
             }
           } catch (IOException e) {
             e.printStackTrace();

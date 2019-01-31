@@ -51,12 +51,16 @@ public class S3SinkConnectorConfig extends HdfsSinkConnectorConfig {
 
   public static final String WAL_GROUP = "DBWAL";
   public static final String S3_GROUP = "s3";
+  public static final String REGEX_GROUP = "regex";
 
   public static final String NAME_CONFIG = "name";
   private static final String NAME_DOC =
       "Name of the connector";
   public static final String NAME_DEFAULT = "";
   private static final String NAME_DISPLAY = "Connector Name";
+
+  public static final String REGEX = "topic.regex";
+  public static final String REPLACEMENT = "topic.replacement";
 
 
   static {
@@ -66,6 +70,8 @@ public class S3SinkConnectorConfig extends HdfsSinkConnectorConfig {
     config.define(DB_USER_CONFIG, ConfigDef.Type.STRING, DB_USER_DEFAULT, ConfigDef.Importance.LOW, DB_USER_DOC, WAL_GROUP, 1, ConfigDef.Width.MEDIUM, DB_USER_DISPLAY);
     config.define(DB_PASSWORD_CONFIG, ConfigDef.Type.STRING, DB_PASSWORD_DEFAULT, ConfigDef.Importance.LOW, DB_PASSWORD_DOC, WAL_GROUP, 1, ConfigDef.Width.MEDIUM, DB_PASSWORD_DISPLAY);
     config.define(NAME_CONFIG, ConfigDef.Type.STRING, NAME_DEFAULT, ConfigDef.Importance.HIGH, NAME_DOC, S3_GROUP,1, ConfigDef.Width.MEDIUM, NAME_DISPLAY);
+    config.define(REGEX, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE, ConfigDef.Importance.HIGH, "Regular expression to use for matching.",REGEX_GROUP,1, ConfigDef.Width.MEDIUM, "Topic Regex String");
+    config.define(REPLACEMENT, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE, ConfigDef.Importance.HIGH, "Replacement string.",REGEX_GROUP,1, ConfigDef.Width.MEDIUM, "Topic Replacement String");
   }
 
 

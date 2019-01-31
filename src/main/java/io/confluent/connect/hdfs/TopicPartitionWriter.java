@@ -14,14 +14,15 @@
 
 package io.confluent.connect.hdfs;
 
-import com.qubole.streamx.s3.S3SinkConnectorConstants;
+import com.qubole.streamx.s3.S3SinkConnectorConfig;
 import com.qubole.streamx.s3.wal.DBWAL;
-import com.qubole.streamx.s3.wal.DBWAL;
+import com.qubole.streamx.RegexHelper;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.IllegalWorkerStateException;
@@ -34,8 +35,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -85,7 +84,6 @@ public class TopicPartitionWriter {
   private AvroData avroData;
   private Set<String> appended;
   private long offset;
-  private boolean sawInvalidOffset;
   private Map<String, Long> startOffsets;
   private Map<String, Long> offsets;
   private long timeoutMs;
@@ -105,6 +103,8 @@ public class TopicPartitionWriter {
   private ExecutorService executorService;
   private Queue<Future<Void>> hiveUpdateFutures;
   private Set<String> hivePartitions;
+
+  private RegexHelper regexHelper;
 
   public TopicPartitionWriter(
       TopicPartition tp,
@@ -152,6 +152,8 @@ public class TopicPartitionWriter {
     String logsDir = connectorConfig.getString(HdfsSinkConnectorConfig.LOGS_DIR_CONFIG);
     wal = storage.wal(logsDir, tp);
 
+    regexHelper = new RegexHelper(connectorConfig.getString(S3SinkConnectorConfig.REGEX), connectorConfig.getString(S3SinkConnectorConfig.REPLACEMENT));
+
     buffer = new LinkedList<>();
     writers = new HashMap<>();
     tempFiles = new HashMap<>();
@@ -161,7 +163,6 @@ public class TopicPartitionWriter {
     state = State.RECOVERY_STARTED;
     failureTime = -1L;
     offset = -1L;
-    sawInvalidOffset = false;
     extension = writerProvider.getExtension();
     zeroPadOffsetFormat
         = "%0" +
@@ -273,7 +274,7 @@ public class TopicPartitionWriter {
           case WRITE_PARTITION_PAUSED:
             if (currentSchema == null) {
               if (compatibility != Compatibility.NONE && offset != -1) {
-                String topicDir = FileUtils.topicDirectory(url, topicsDir, tp.topic());
+                String topicDir = FileUtils.topicDirectory(url, topicsDir, regexHelper.regexReplace(tp.topic()));
                 CommittedFileFilter filter = new TopicPartitionCommittedFileFilter(tp);
                 FileStatus fileStatusWithMaxOffset = FileUtils.fileStatusWithMaxOffset(storage, new Path(topicDir), filter);
                 if (fileStatusWithMaxOffset != null) {
@@ -413,7 +414,7 @@ public class TopicPartitionWriter {
   }
 
   private String getDirectory(String encodedPartition) {
-    return partitioner.generatePartitionedPath(tp.topic(), encodedPartition);
+    return partitioner.generatePartitionedPath(regexHelper.regexReplace(tp.topic()), encodedPartition);
   }
 
   private void nextState() {
@@ -439,7 +440,7 @@ public class TopicPartitionWriter {
 
   private void readOffset() throws ConnectException {
     try {
-      String path = FileUtils.topicDirectory(url, topicsDir, tp.topic());
+      String path = FileUtils.topicDirectory(url, topicsDir, regexHelper.regexReplace(tp.topic()));
       CommittedFileFilter filter = new TopicPartitionCommittedFileFilter(tp);
       FileStatus fileStatusWithMaxOffset = FileUtils.fileStatusWithMaxOffset(storage, new Path(path), filter);
       if (fileStatusWithMaxOffset != null) {
@@ -458,8 +459,7 @@ public class TopicPartitionWriter {
     context.resume(tp);
   }
 
-  private RecordWriter<SinkRecord> getWriter(SinkRecord record, String encodedPartition)
-      throws ConnectException {
+  private RecordWriter<SinkRecord> getWriter(SinkRecord record, String encodedPartition) {
     try {
       if (writers.containsKey(encodedPartition)) {
         return writers.get(encodedPartition);
@@ -473,7 +473,7 @@ public class TopicPartitionWriter {
       }
       return writer;
     } catch (IOException e) {
-      throw new ConnectException(e);
+      throw new KafkaException(e);
     }
   }
 
@@ -513,34 +513,23 @@ public class TopicPartitionWriter {
       // written to a tempfile, but then that tempfile was discarded). To protect against this, even if we just want
       // to start at offset 0 or reset to the earliest offset, we specify that explicitly to forcibly override any
       // committed offsets.
-      long seekOffset = offset > 0 ? offset : 0;
-      log.debug("Resetting offset for {} to {}", tp, seekOffset);
-      context.offset(tp, seekOffset);
+      if (offset > 0) {
+          log.debug("Resetting offset for {} to {}", tp, offset);
+          context.offset(tp, offset);
+      } else {
+          // The offset was not found, so rather than forcibly set the offset to 0 we let the
+          // consumer decide where to start based upon standard consumer offsets (if available)
+          // or the consumer's `auto.offset.reset` configuration
+          log.debug("Resetting offset for {} based upon existing consumer group offsets or, if "
+          + "there are none, the consumer's 'auto.offset.reset' value.",tp);
+      }
       recovered = true;
     }
   }
 
   private void writeRecord(SinkRecord record) throws IOException {
-    long expectedOffset = offset + recordCounter;
     if (offset == -1) {
       offset = record.kafkaOffset();
-    } else if (record.kafkaOffset() != expectedOffset) {
-      // Currently it's possible to see stale data with the wrong offset after a rebalance when you
-      // rewind, which we do since we manage our own offsets. See KAFKA-2894.
-      if (!sawInvalidOffset) {
-        log.info(
-            "Ignoring stale out-of-order record in {}-{}. Has offset {} instead of expected offset {}",
-            record.topic(), record.kafkaPartition(), record.kafkaOffset(), expectedOffset);
-      }
-      sawInvalidOffset = true;
-      return;
-    }
-
-    if (sawInvalidOffset) {
-      log.info(
-          "Recovered from stale out-of-order records in {}-{} with offset {}",
-          record.topic(), record.kafkaPartition(), expectedOffset);
-      sawInvalidOffset = false;
     }
 
     String encodedPartition = partitioner.encodePartition(record);
@@ -650,7 +639,7 @@ public class TopicPartitionWriter {
     Future<Void> future = executorService.submit(new Callable<Void>() {
       @Override
       public Void call() throws HiveMetaStoreException {
-        hive.createTable(hiveDatabase, tp.topic(), currentSchema, partitioner);
+        hive.createTable(hiveDatabase, regexHelper.regexReplace(tp.topic()), currentSchema, partitioner);
         return null;
       }
     });
@@ -661,7 +650,7 @@ public class TopicPartitionWriter {
     Future<Void> future = executorService.submit(new Callable<Void>() {
       @Override
       public Void call() throws HiveMetaStoreException {
-        hive.alterSchema(hiveDatabase, tp.topic(), currentSchema);
+        hive.alterSchema(hiveDatabase, regexHelper.regexReplace(tp.topic()), currentSchema);
         return null;
       }
     });
@@ -672,7 +661,7 @@ public class TopicPartitionWriter {
     Future<Void> future = executorService.submit(new Callable<Void>() {
       @Override
       public Void call() throws Exception {
-        hiveMetaStore.addPartition(hiveDatabase, tp.topic(), location);
+        hiveMetaStore.addPartition(hiveDatabase, regexHelper.regexReplace(tp.topic()), location);
         return null;
       }
     });
